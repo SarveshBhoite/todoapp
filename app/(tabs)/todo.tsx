@@ -1,151 +1,316 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet,
-  LayoutAnimation, Platform, UIManager,
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SwipeListView } from "react-native-swipe-list-view";
 import { useAuth } from "../../context/AuthContext";
 import { API } from "../../lib/api";
 
-// enable animations for Android
-if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
+// Enable animation on Android
+if (
+  Platform.OS === "android" &&
+  UIManager.setLayoutAnimationEnabledExperimental
+) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-type Todo = { _id: string; text: string; done: boolean; createdAt?: string };
+// ---------- Types ----------
+type Priority = "high" | "medium" | "low";
+
+type Todo = {
+  _id: string;
+  text: string;
+  done: boolean;
+  priority: Priority;
+};
+
+// helper: always ensure valid priority
+const normalizePriority = (p: any): Priority => {
+  if (p === "high" || p === "low" || p === "medium") return p;
+  return "medium";
+};
+
+// helper: sort list by priority (High → Medium → Low)
+const sortTodos = (list: Todo[]): Todo[] => {
+  const weight: Record<Priority, number> = { high: 3, medium: 2, low: 1 };
+  return [...list].sort((a, b) => weight[b.priority] - weight[a.priority]);
+};
 
 export default function TodoScreen() {
   const { token } = useAuth();
+
   const [task, setTask] = useState("");
+  const [priority, setPriority] = useState<Priority>("medium");
   const [todos, setTodos] = useState<Todo[]>([]);
 
-  // Load todos + fallback to cache (offline support)
-  const loadTodos = async () => {
+  // -------- Load todos from API (or cache) --------
+  const loadTodos = useCallback(async () => {
     try {
-      const res = await API.get("/todo", { headers:{ token } });
-      setTodos(res.data);
-      await AsyncStorage.setItem("todos_cache", JSON.stringify(res.data));
-    } catch {
-      console.log("⚠ Server offline — using cached data");
+      const res = await API.get("/todo", { headers: { token } });
+
+      const fixed: Todo[] = res.data.map((t: any) => ({
+        _id: t._id,
+        text: t.text,
+        done: Boolean(t.done),
+        priority: normalizePriority(t.priority),
+      }));
+
+      const sorted = sortTodos(fixed);
+      setTodos(sorted);
+      await AsyncStorage.setItem("todos_cache", JSON.stringify(sorted));
+    } catch (err) {
+      console.log("⚠ Failed to fetch from server, using cache", err);
       const cached = await AsyncStorage.getItem("todos_cache");
-      if (cached) setTodos(JSON.parse(cached));
+      if (cached) {
+        try {
+          const parsed: Todo[] = JSON.parse(cached);
+          setTodos(parsed);
+        } catch {
+          // ignore invalid cache
+        }
+      }
     }
-  };
+  }, [token]);
 
-  useEffect(() => { loadTodos(); }, []);
+  useEffect(() => {
+    loadTodos();
+  }, [loadTodos]);
 
-  // Add Todo (Optimistic UI)
+  // -------- Add task with priority --------
   const addTodo = async () => {
     const text = task.trim();
-    if (!text) return;
-    setTask("");
+    if (!text) return alert("Write a task first!");
+
+    const body = { text, priority };
+
+    // optimistic temp item
+    const temp: Todo = {
+      _id: Date.now().toString(),
+      text,
+      done: false,
+      priority,
+    };
 
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-
-    const temp = { _id: Date.now().toString(), text, done:false };
-    setTodos(prev => [temp, ...prev]); // instant UI
+    setTodos((prev) => sortTodos([temp, ...prev]));
+    setTask("");
 
     try {
-      const res = await API.post("/todo/add", { text }, { headers:{ token } });
-      setTodos(prev => prev.map(t => t._id === temp._id ? res.data : t)); // replace temp with real
-    } catch {
-      alert("❗ Failed syncing to cloud");
+      const res = await API.post("/todo/add", body, { headers: { token } });
+      const serverTodo: Todo = {
+        _id: res.data._id,
+        text: res.data.text,
+        done: res.data.done,
+        priority: normalizePriority(res.data.priority),
+      };
+
+      // replace temp with real one using latest state
+      setTodos((prev) => {
+        const withoutTemp = prev.filter((t) => t._id !== temp._id);
+        return sortTodos([...withoutTemp, serverTodo]);
+      });
+    } catch (err) {
+      alert("Cloud sync failed, reloading from server");
       loadTodos();
     }
   };
 
-  // Toggle Done ✔
-  const toggleDone = async (id:string) => {
+  // -------- Toggle done ✔ --------
+  const toggleDone = async (id: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setTodos(prev => prev.map(t => t._id === id ? {...t, done:!t.done} : t));
 
-    await API.post("/todo/toggle", { id }, { headers:{ token } });
-  };
-
-  // Delete Todo
-  const deleteTodo = async (id:string) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    const backup = todos;
-    setTodos(prev => prev.filter(t => t._id !== id));
+    setTodos((prev) =>
+      sortTodos(
+        prev.map((t) => (t._id === id ? { ...t, done: !t.done } : t))
+      )
+    );
 
     try {
-      await API.post("/todo/delete", { id }, { headers:{ token } });
-    } catch {
-      alert("⚠ Delete failed — restored");
-      setTodos(backup);
+      await API.post(
+        "/todo/toggle",
+        { id },
+        {
+          headers: { token },
+        }
+      );
+    } catch (err) {
+      console.log("Toggle failed, refreshing", err);
+      loadTodos();
+    }
+  };
+
+  // -------- Delete task --------
+  const deleteTodo = async (id: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+
+    // optimistic delete
+    setTodos((prev) => prev.filter((t) => t._id !== id));
+
+    try {
+      await API.post(
+        "/todo/delete",
+        { id },
+        {
+          headers: { token },
+        }
+      );
+    } catch (err) {
+      alert("Delete failed, refreshing");
+      loadTodos();
     }
   };
 
   return (
     <View style={styles.container}>
-      
-      {/* HEADER UI */}
-      <Text style={styles.heading}>🔥 Smart Todo Manager</Text>
+      <Text style={styles.heading}>🔥 Priority Task Manager</Text>
       <Text style={styles.subheading}>
-        {todos.filter(t=>!t.done).length} pending • {todos.filter(t=>t.done).length} done
+        {todos.filter((t) => !t.done).length} pending ·{" "}
+        {todos.filter((t) => t.done).length} done
       </Text>
 
-      {/* INPUT BAR */}
-      <View style={styles.inputRow}>
+      {/* INPUT + PRIORITY + ADD */}
+      <View style={styles.row}>
         <TextInput
-          style={styles.input}
-          placeholder="Add task..."
+          placeholder="Add a task..."
           placeholderTextColor="#8A94A6"
+          style={styles.input}
           value={task}
           onChangeText={setTask}
-          onSubmitEditing={addTodo}
         />
-        <TouchableOpacity style={styles.addButton} onPress={addTodo}>
-          <Text style={styles.addButtonText}>+</Text>
+
+        {/* Priority selector */}
+        <View style={styles.priorityBox}>
+          <TouchableOpacity onPress={() => setPriority("high")}>
+            <Text
+              style={[styles.pill, priority === "high" && styles.activeRed]}
+            >
+              H
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setPriority("medium")}>
+            <Text
+              style={[styles.pill, priority === "medium" && styles.activeYellow]}
+            >
+              M
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setPriority("low")}>
+            <Text
+              style={[styles.pill, priority === "low" && styles.activeGreen]}
+            >
+              L
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <TouchableOpacity style={styles.addBtn} onPress={addTodo}>
+          <Text style={styles.plus}>+</Text>
         </TouchableOpacity>
       </View>
 
       {/* SWIPE LIST */}
       <SwipeListView
-        style={{ marginTop: 10 }}
         data={todos}
-        keyExtractor={item => item._id}
-        contentContainerStyle={{ paddingBottom: 50 }}
+        keyExtractor={(item) => item._id}
+        contentContainerStyle={{ paddingBottom: 60 }}
+        disableRightSwipe
+        rightOpenValue={-85}
         renderItem={({ item }) => (
           <TouchableOpacity
             onPress={() => toggleDone(item._id)}
-            style={[styles.todoItem, item.done && styles.todoItemDone]}
-            activeOpacity={0.8}
+            style={[styles.todo, item.done && styles.done]}
           >
-            <Text style={[styles.todoText, item.done && styles.todoTextDone]}>
-              {item.done ? "✔ " : ""}{item.text}
+            <Text style={[styles.text, item.done && styles.textDone]}>
+              {item.done ? "✔ " : ""} {item.text}
+            </Text>
+
+            <Text style={styles.priorityTag}>
+              {item.priority === "high"
+                ? "🔥 High priority"
+                : item.priority === "medium"
+                ? "⭐ Medium priority"
+                : "🟢 Low priority"}
             </Text>
           </TouchableOpacity>
         )}
         renderHiddenItem={({ item }) => (
-          <View style={styles.hiddenRow}>
-            <TouchableOpacity style={styles.deleteButton} onPress={() => deleteTodo(item._id)}>
+          <View style={styles.hidden}>
+            <TouchableOpacity
+              style={styles.deleteBtn}
+              onPress={() => deleteTodo(item._id)}
+            >
               <Text style={styles.deleteText}>Delete</Text>
             </TouchableOpacity>
           </View>
         )}
-        rightOpenValue={-85}
-        disableRightSwipe
       />
     </View>
   );
 }
 
-/* 🎨 UI */
+/************** UI **************/
 const styles = StyleSheet.create({
-  container:{flex:1,backgroundColor:"#050816",paddingTop:60,paddingHorizontal:20},
-  heading:{color:"#fff",fontSize:26,fontWeight:"800"},
-  subheading:{color:"#8a9bb5",marginTop:5,fontSize:14,marginBottom:15},
-  inputRow:{flexDirection:"row",gap:10,alignItems:"center"},
-  input:{flex:1,backgroundColor:"#111827",color:"#fff",padding:12,borderRadius:10,fontSize:16},
-  addButton:{backgroundColor:"#22c55e",paddingHorizontal:18,paddingVertical:10,borderRadius:10},
-  addButtonText:{fontSize:22,fontWeight:"900",color:"#fff"},
-  todoItem:{backgroundColor:"#111827",padding:14,borderRadius:12,marginBottom:10},
-  todoItemDone:{backgroundColor:"#065f46"},
-  todoText:{color:"#fff",fontSize:16},
-  todoTextDone:{textDecorationLine:"line-through",color:"#a7f3d0"},
-  hiddenRow:{flex:1,justifyContent:"center",alignItems:"flex-end",marginBottom:10},
-  deleteButton:{backgroundColor:"#ef4444",paddingVertical:12,paddingHorizontal:18,borderRadius:12},
-  deleteText:{color:"#fff",fontWeight:"700"}
+  container: {
+    flex: 1,
+    backgroundColor: "#050816",
+    paddingTop: 60,
+    paddingHorizontal: 20,
+  },
+  heading: { color: "#fff", fontSize: 26, fontWeight: "800" },
+  subheading: { color: "#8a9bb5", marginBottom: 15 },
+
+  row: { flexDirection: "row", gap: 10, alignItems: "center" },
+  input: {
+    flex: 1,
+    backgroundColor: "#111827",
+    color: "#fff",
+    padding: 12,
+    borderRadius: 10,
+    fontSize: 16,
+  },
+
+  priorityBox: { flexDirection: "row", alignItems: "center", gap: 5 },
+  pill: {
+    color: "#aaa",
+    fontWeight: "bold",
+    padding: 6,
+    borderRadius: 6,
+    fontSize: 14,
+    backgroundColor: "#1F2433",
+  },
+  activeRed: { backgroundColor: "#ef4444", color: "#fff" },
+  activeYellow: { backgroundColor: "#facc15", color: "#000" },
+  activeGreen: { backgroundColor: "#22c55e", color: "#fff" },
+
+  addBtn: { backgroundColor: "#22c55e", padding: 12, borderRadius: 10 },
+  plus: { fontSize: 22, fontWeight: "900", color: "#fff" },
+
+  todo: {
+    backgroundColor: "#111827",
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 10,
+  },
+  done: { backgroundColor: "#065f46" },
+  text: { color: "#fff", fontSize: 16 },
+  textDone: { color: "#a7f3d0", textDecorationLine: "line-through" },
+
+  priorityTag: { fontSize: 12, color: "#9ca3af", marginTop: 4 },
+
+  hidden: { flex: 1, justifyContent: "center", alignItems: "flex-end" },
+  deleteBtn: {
+    backgroundColor: "#ef4444",
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: 12,
+  },
+  deleteText: { color: "#fff", fontWeight: "700" },
 });
