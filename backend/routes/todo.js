@@ -25,10 +25,20 @@ router.get("/", auth, async (req, res) => {
 
 // Add todo
 router.post("/add", auth, async (req, res) => {
-  const { text } = req.body;
-  const todo = await Todo.create({ userId: req.user, text, done: false });
+  const { text, dueDate } = req.body;
+
+  if (!text) return res.json({ error: "Task text required" });
+
+  const todo = await Todo.create({
+    userId: req.user,
+    text,
+    done: false,
+    dueDate: dueDate ? new Date(dueDate) : null,
+  });
+
   res.json(todo);
 });
+
 
 // Toggle done
 router.post("/toggle", auth, async (req, res) => {

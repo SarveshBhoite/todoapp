@@ -8,7 +8,7 @@ import { SwipeListView } from "react-native-swipe-list-view";
 import { useAuth } from "../../context/AuthContext";
 import { API } from "../../lib/api";
 
-// enable animations on android
+// enable animations for Android
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
@@ -20,13 +20,14 @@ export default function TodoScreen() {
   const [task, setTask] = useState("");
   const [todos, setTodos] = useState<Todo[]>([]);
 
-  // Load todos with fallback cache
+  // Load todos + fallback to cache (offline support)
   const loadTodos = async () => {
     try {
       const res = await API.get("/todo", { headers:{ token } });
       setTodos(res.data);
       await AsyncStorage.setItem("todos_cache", JSON.stringify(res.data));
     } catch {
+      console.log("⚠ Server offline — using cached data");
       const cached = await AsyncStorage.getItem("todos_cache");
       if (cached) setTodos(JSON.parse(cached));
     }
@@ -34,7 +35,7 @@ export default function TodoScreen() {
 
   useEffect(() => { loadTodos(); }, []);
 
-  // Add new todo (Optimistic)
+  // Add Todo (Optimistic UI)
   const addTodo = async () => {
     const text = task.trim();
     if (!text) return;
@@ -43,59 +44,58 @@ export default function TodoScreen() {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 
     const temp = { _id: Date.now().toString(), text, done:false };
-    setTodos([temp, ...todos]); // instant UI update
+    setTodos(prev => [temp, ...prev]); // instant UI
 
     try {
       const res = await API.post("/todo/add", { text }, { headers:{ token } });
-      setTodos(prev => prev.map(t => t._id === temp._id ? res.data : t));
+      setTodos(prev => prev.map(t => t._id === temp._id ? res.data : t)); // replace temp with real
     } catch {
-      alert("Failed to sync online ❗");
+      alert("❗ Failed syncing to cloud");
       loadTodos();
     }
   };
 
-  // Toggle status ✔
+  // Toggle Done ✔
   const toggleDone = async (id:string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setTodos(prev => prev.map(t => t._id === id ? {...t, done:!t.done} : t)); // fast UI swap
+    setTodos(prev => prev.map(t => t._id === id ? {...t, done:!t.done} : t));
 
     await API.post("/todo/toggle", { id }, { headers:{ token } });
   };
 
-  // Delete todo 🔥
+  // Delete Todo
   const deleteTodo = async (id:string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    const orig = todos;
+    const backup = todos;
     setTodos(prev => prev.filter(t => t._id !== id));
 
     try {
       await API.post("/todo/delete", { id }, { headers:{ token } });
     } catch {
-      alert("Delete failed — Restored");
-      setTodos(orig);
+      alert("⚠ Delete failed — restored");
+      setTodos(backup);
     }
   };
 
   return (
     <View style={styles.container}>
-
-      {/* Header */}
+      
+      {/* HEADER UI */}
       <Text style={styles.heading}>🔥 Smart Todo Manager</Text>
       <Text style={styles.subheading}>
-        {todos.filter(t=>!t.done).length} tasks pending • {todos.filter(t=>t.done).length} done
+        {todos.filter(t=>!t.done).length} pending • {todos.filter(t=>t.done).length} done
       </Text>
 
-      {/* Input row */}
+      {/* INPUT BAR */}
       <View style={styles.inputRow}>
         <TextInput
           style={styles.input}
-          placeholder="Add new task..."
+          placeholder="Add task..."
           placeholderTextColor="#8A94A6"
           value={task}
           onChangeText={setTask}
           onSubmitEditing={addTodo}
         />
-
         <TouchableOpacity style={styles.addButton} onPress={addTodo}>
           <Text style={styles.addButtonText}>+</Text>
         </TouchableOpacity>
@@ -105,16 +105,16 @@ export default function TodoScreen() {
       <SwipeListView
         style={{ marginTop: 10 }}
         data={todos}
-        keyExtractor={(item) => item._id}
-        contentContainerStyle={{ paddingBottom: 40 }}
+        keyExtractor={item => item._id}
+        contentContainerStyle={{ paddingBottom: 50 }}
         renderItem={({ item }) => (
           <TouchableOpacity
             onPress={() => toggleDone(item._id)}
-            activeOpacity={0.7}
             style={[styles.todoItem, item.done && styles.todoItemDone]}
+            activeOpacity={0.8}
           >
             <Text style={[styles.todoText, item.done && styles.todoTextDone]}>
-              {item.done ? "✔ " : ""} {item.text}
+              {item.done ? "✔ " : ""}{item.text}
             </Text>
           </TouchableOpacity>
         )}
@@ -125,18 +125,18 @@ export default function TodoScreen() {
             </TouchableOpacity>
           </View>
         )}
-        rightOpenValue={-90}
+        rightOpenValue={-85}
         disableRightSwipe
       />
     </View>
   );
 }
 
-// 🎨 UI
+/* 🎨 UI */
 const styles = StyleSheet.create({
   container:{flex:1,backgroundColor:"#050816",paddingTop:60,paddingHorizontal:20},
   heading:{color:"#fff",fontSize:26,fontWeight:"800"},
-  subheading:{color:"#8a9bb5",marginBottom:15,fontSize:14},
+  subheading:{color:"#8a9bb5",marginTop:5,fontSize:14,marginBottom:15},
   inputRow:{flexDirection:"row",gap:10,alignItems:"center"},
   input:{flex:1,backgroundColor:"#111827",color:"#fff",padding:12,borderRadius:10,fontSize:16},
   addButton:{backgroundColor:"#22c55e",paddingHorizontal:18,paddingVertical:10,borderRadius:10},
